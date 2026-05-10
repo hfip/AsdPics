@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const { load } = require("cheerio");
 
-// حل مشكلة توافق node-fetch الحديثة مع نظام require
+// حل مشكلة استدعاء node-fetch في بيئة CommonJS
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const PORT = process.env.PORT || 7001;
@@ -15,7 +15,7 @@ const FALLBACK_POSTER =
 const pageCache = new Map();
 const streamCache = new Map();
 const PAGE_TTL = 5 * 60 * 1000;
-const STREAM_TTL = 20 * 60 * 1000; // 20 دقيقة (token يدوم 12 ساعة)
+const STREAM_TTL = 20 * 60 * 1000;
 
 async function fetchHtml(url, referer = BASE) {
   const cached = pageCache.get(url);
@@ -538,6 +538,6 @@ app.get("/stream/:type/:id.json", async (req, res) => {
 
 app.listen(PORT, () =>
   console.log(
-    `Qeseh Stremio Addon v1.1.0 running on port ${PORT}\nManifest: http://localhost:${PORT}/manifest.json`
+    `Qeseh Stremio Addon running on port ${PORT}`
   )
 );
