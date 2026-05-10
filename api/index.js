@@ -2,7 +2,6 @@ const express = require("express");
 const cors = require("cors");
 const { load } = require("cheerio");
 
-// حل توافقية node-fetch مع Vercel Serverless
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const app = express();
@@ -13,7 +12,7 @@ const BASE_URL = "https://asd.pics";
 const TMDB_KEY = "f090bb54758cabaf2312cdbf31fa6e55";
 
 const pageCache = new Map();
-const PAGE_TTL = 3 * 60 * 1000; // تقليص الكاش لضمان تحديث الروابط المؤقتة سريعا
+const PAGE_TTL = 3 * 60 * 1000;
 
 async function fetchHtml(url) {
   const cached = pageCache.get(url);
@@ -22,7 +21,7 @@ async function fetchHtml(url) {
   try {
     const res = await fetch(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "ar,en-US;q=0.7,en;q=0.3",
         "Referer": BASE_URL,
@@ -33,26 +32,42 @@ async function fetchHtml(url) {
     pageCache.set(url, { html, ts: Date.now() });
     return html;
   } catch (err) {
-    console.error("[-] خطأ أثناء جلب الصفحة:", err.message);
+    console.error("[-] Error fetching HTML:", err.message);
     return null;
   }
 }
 
-// دالة فك تشفير Base64 بدقة فائقة
-function decodeBase64(str) {
+// دالة مخصصة لإرسال طلب POST لمطابقة نظام Ajax في الموقع لجلب السيرفرات
+async function postAjax(url, data, referer) {
   try {
-    const cleanStr = str.trim().replace(/[^A-Za-z0-9+/=]/g, "");
-    return Buffer.from(cleanStr, 'base64').toString('utf-8');
-  } catch (e) {
+    const formBody = Object.keys(data)
+      .map(key => encodeURIComponent(key) + '=' + encodeURIComponent(data[key]))
+      .join('&');
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": referer,
+        "Origin": BASE_URL
+      },
+      body: formBody,
+      timeout: 8000
+    });
+    return await res.text();
+  } catch (err) {
+    console.error("[-] Error in POST request:", err.message);
     return null;
   }
 }
 
 const manifest = {
   id: "community.asdpics.abdulluhx",
-  version: "1.3.0",
+  version: "1.4.0",
   name: "Asd Pics by Abdulluh.X",
-  description: "إضافة متطورة لسحب البث والروابط وفك تشفير السيرفرات تلقائياً من موقع Asd Pics وعرب سيد",
+  description: "إضافة متطورة لسحب البث والروابط بالاعتماد على منطق سحب Cloudstream الذكي",
   logo: "https://asd.pics/templates/Default/images/logo.png",
   resources: ["stream"],
   types: ["movie", "series"],
@@ -60,7 +75,7 @@ const manifest = {
   idPrefixes: ["tt"]
 };
 
-// جلب الاسم العربي من TMDB
+// جلب الاسم العربي للمادة من TMDB
 async function getTmdbMeta(imdbId, type) {
   try {
     const tmdbType = type === "movie" ? "movie" : "tv";
@@ -78,19 +93,19 @@ async function getTmdbMeta(imdbId, type) {
     const title = arData.name || arData.title || result.name || result.title || "";
     return { arabicTitle: title.trim() };
   } catch (e) {
-    console.error("[-] فشل جلب الاسم العربي من TMDB:", e.message);
+    console.error("[-] TMDB fetch error:", e.message);
     return null;
   }
 }
 
-// البحث الذكي داخل الموقع
+// البحث عن الصفحة المطلوبة في الموقع
 async function searchAsdPics(arabicTitle, type, episode) {
   if (!arabicTitle) return null;
   
   const cleanTitle = arabicTitle.replace(/[^\u0600-\u06FFa-zA-Z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
   const searchUrl = `${BASE_URL}/home7/?story=${encodeURIComponent(cleanTitle)}&do=search&subaction=search`;
   
-  console.log(`[AsdPics] Searching with URL: ${searchUrl}`);
+  console.log(`[AsdPics] Searching URL: ${searchUrl}`);
   const html = await fetchHtml(searchUrl);
   if (!html) return null;
 
@@ -109,7 +124,6 @@ async function searchAsdPics(arabicTitle, type, episode) {
   if (candidates.length === 0) return null;
   let matchedUrl = candidates[0];
 
-  // التوجيه لصفحة الحلقة للمسلسلات
   if (type === "series" && episode && matchedUrl) {
     const pageHtml = await fetchHtml(matchedUrl);
     if (pageHtml) {
@@ -128,7 +142,7 @@ async function searchAsdPics(arabicTitle, type, episode) {
   return matchedUrl;
 }
 
-// استخراج وفك تشفير البث المباشر من كامل الكود الخام للصفحة
+// استخراج السيرفرات الفعلي بناءً على فكرة الـ Ajax وسحب Cloudstream
 async function extractStreams(pageUrl) {
   const html = await fetchHtml(pageUrl);
   if (!html) return [];
@@ -136,41 +150,68 @@ async function extractStreams(pageUrl) {
   const streams = [];
   const seen = new Set();
 
-  // 1. البحث باستخدام الـ Regex عن روابط play.php?url= المخفية في كامل كود الصفحة (HTML الخام)
-  const base64PlayPattern = /play\.php\?url=([A-Za-z0-9+/=]+)/gi;
-  let match;
-  while ((match = base64PlayPattern.exec(html)) !== null) {
-    const decoded = decodeBase64(match[1]);
-    if (decoded && !seen.has(decoded)) {
-      seen.add(decoded);
-      const isHls = decoded.includes(".m3u8");
-      streams.push({
-        url: decoded,
-        title: `سيرفر خاص سريع (${isHls ? "HLS/M3U8" : "MP4"})`
-      });
-    }
+  // 1. استخراج الـ csrf_token والـ post_id من الصفحة الأساسية
+  const csrfTokenMatch = html.match(/['" ]csrf_token['" ]\s*:\s*['"]([^'"]+)['"]/);
+  const csrfToken = csrfTokenMatch ? csrfTokenMatch[1] : null;
+
+  // استخراج الـ post_id من أكواد الميتا أو الحقول المخفية
+  let postId = null;
+  const postIdMatch = html.match(/['" ]post_id['" ]\s*:\s*['" ]?(\d+)['" ]?/i) || html.match(/data-post=["'](\d+)["']/i);
+  if (postIdMatch) {
+    postId = postIdMatch[1];
   }
 
-  // 2. البحث عن أي نصوص مشفرة بالكامل بـ Base64 تبدأ بترميز الرابط الشهير (aHR0cHM6Ly) في الصفحة
-  const rawBase64Pattern = /(aHR0cHM6Ly[A-Za-z0-9+/=]+)/gi;
-  let rawMatch;
-  while ((rawMatch = rawBase64Pattern.exec(html)) !== null) {
-    const decoded = decodeBase64(rawMatch[1]);
-    if (decoded && (decoded.includes("m3u8") || decoded.includes("mp4") || decoded.includes("reviewrate") || decoded.includes("boutique"))) {
-      if (!seen.has(decoded)) {
-        seen.add(decoded);
-        const isHls = decoded.includes(".m3u8");
-        streams.push({
-          url: decoded,
-          title: `سيرفر مدمج ملقط (${isHls ? "HLS/M3U8" : "MP4"})`
+  console.log(`[AsdPics] Extracted Details -> Post ID: ${postId} | CSRF Token: ${csrfToken}`);
+
+  // 2. إذا تم العثور على التوكن والمعرف، نقوم بعمل طلب الـ POST لجلب السيرفرات النشطة
+  if (csrfToken && postId) {
+    const ajaxUrl = `${BASE_URL}/get__watch__server/`;
+    const postData = {
+      "post_id": postId,
+      "csrf_token": csrfToken
+    };
+
+    console.log(`[AsdPics] Sending POST to: ${ajaxUrl}`);
+    const ajaxResponse = await postAjax(ajaxUrl, postData, pageUrl);
+
+    if (ajaxResponse) {
+      // البحث عن أي iframe أو روابط m3u8 ناتجة عن الـ Ajax
+      const $ajax = load(ajaxResponse);
+      
+      // أ) قراءة روابط iframe السيرفرات
+      $ajax("iframe, a").each((_i, el) => {
+        let src = $ajax(el).attr("src") || $ajax(el).attr("href") || "";
+        if (src.startsWith("//")) src = `https:${src}`;
+        
+        if (src && !seen.has(src)) {
+          seen.add(src);
+          const isHls = src.includes("m3u8") || src.includes("reviewrate");
+          streams.push({
+            url: src,
+            title: `سيرفر عرب سيد أساسي (${isHls ? "HLS" : "MP4"})`
+          });
+        }
+      });
+
+      // ب) البحث عن روابط m3u8 مباشرة في استجابة الـ Ajax
+      const m3u8Matches = ajaxResponse.match(/https?:\/\/[^\s"']+\.m3u8[^\s"']*/gi);
+      if (m3u8Matches) {
+        m3u8Matches.forEach(url => {
+          if (!seen.has(url)) {
+            seen.add(url);
+            streams.push({
+              url: url,
+              title: "بث سحابي مباشر (M3U8)"
+            });
+          }
         });
       }
     }
   }
 
-  // 3. مسح كلاسيكي احتياطي للروابط والمشغلات الظاهرة
+  // 3. مسح كلاسيكي احتياطي في حال فشل طلب الـ Ajax أو لم يتوفر
   const $ = load(html);
-  $("iframe, a, source, video, button").each((_i, el) => {
+  $("iframe, a, source, video").each((_i, el) => {
     let src = $(el).attr("src") || $(el).attr("href") || $(el).attr("data-src") || $(el).attr("data-link") || "";
     if (src.startsWith("//")) src = `https:${src}`;
     if (src.startsWith("/")) src = `${BASE_URL}${src}`;
@@ -201,15 +242,15 @@ async function extractStreams(pageUrl) {
 async function getAsdPicsStreams(imdbId, type, season, episode) {
   const meta = await getTmdbMeta(imdbId, type);
   if (!meta || !meta.arabicTitle) {
-    console.log("[AsdPics] No Arabic title found for: " + imdbId);
+    console.log("[AsdPics] No Arabic title found for ID: " + imdbId);
     return [];
   }
 
-  console.log("[AsdPics] Fetching title: " + meta.arabicTitle + " (E" + episode + ")");
+  console.log("[AsdPics] Found title: " + meta.arabicTitle + " (E" + episode + ")");
 
   const pageUrl = await searchAsdPics(meta.arabicTitle, type, episode);
   if (!pageUrl) {
-    console.log("[AsdPics] Page not found");
+    console.log("[AsdPics] Target Page not found");
     return [];
   }
 
@@ -218,7 +259,7 @@ async function getAsdPicsStreams(imdbId, type, season, episode) {
 
   return rawStreams.map(s => ({
     name: "Asd Pics by Abdulluh.X",
-    title: `🎬 ${s.title} | جودة متعددة`,
+    title: `🎬 ${s.title} | جودة متعددة 🌐`,
     url: s.url,
     behaviorHints: {
       notWebReady: false,
@@ -247,7 +288,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
 
   try {
     const streams = await getAsdPicsStreams(imdbId, type, season, episode);
-    console.log("[AsdPics] Streams count returned: " + streams.length);
+    console.log("[AsdPics] Streams count: " + streams.length);
     res.json({ streams });
   } catch (e) {
     console.error("[AsdPics] Error: " + e.message);
