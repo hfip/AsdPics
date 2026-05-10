@@ -1,11 +1,11 @@
 const https = require("https");
 const http = require("http");
 
-const BASE = "https://arabseed.ink";
-const WATCH_BASE = "https://m.reviewrate.net"; // النطاق الرئيسي الفعلي للمشاهدة وتخطي الحجب
+const BASE_URL = "https://arabseed.ink";
+const WATCH_BASE = "https://m.reviewrate.net"; // نطاق المشغل المباشر لتخطي الحماية
 const TMDB_KEY = "439c478a771f35c05022f9feabcca01c";
 
-// الهيدرز المعتمدة لتطابق كامل مع تطبيق Cloudstream وتجاوز الفلترة الأمنية
+// إعداد الهيدرز المطابقة تماماً لتطبيق Cloudstream لضمان تجاوز فلترة الحماية
 const EXACT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -108,12 +108,12 @@ async function getTmdbMeta(imdbId, type) {
     };
 }
 
-// دالة فك وتجميع روابط البث المباشر (m3u8 / mp4) من سيرفرات عرب سيد
+// دالة تفكيك واستخراج روابط البث المباشرة من المشغل مباشرة
 async function extractDirectGameHubStreams(imdbId) {
     const embedUrl = `${WATCH_BASE}/embed-${imdbId}.html`;
     const watchUrl = `${WATCH_BASE}/watch/${imdbId}`;
 
-    // 1. جلب كود صفحة المشاهدة لتأمين التوكن ومعرف المقال المباشر
+    // 1. طلب صفحة الـ embed مباشرة لتفادي فلترة Cloudflare لنطاق عرب سيد الرئيسي
     let html = await fetchText(embedUrl, { "Referer": "https://asd.pics/" });
     if (!html || html.length < 500) {
         html = await fetchText(watchUrl, { "Referer": "https://asd.pics/" });
@@ -132,10 +132,10 @@ async function extractDirectGameHubStreams(imdbId) {
     if (objIdMatch) {
         objId = objIdMatch[1];
     } else {
-        objId = imdbId.replace(/\D/g, ""); // استخراج المعرف الرقمي كـ fallback
+        objId = imdbId.replace(/\D/g, ""); // استخراج الرقم من معرف IMDb كاحتياط
     }
 
-    // 3. محاكاة طلب POST لصفحة /get__watch__server/ للحصول على السيرفرات النشطة
+    // 3. إرسال طلب الـ POST لاستخراج السيرفرات الحقيقية
     if (csrfToken && objId) {
         const ajaxUrl = `${WATCH_BASE}/get__watch__server/`;
         const postDataBody = {
@@ -146,7 +146,7 @@ async function extractDirectGameHubStreams(imdbId) {
         const ajaxResponse = await postData(ajaxUrl, postDataBody, { "Referer": embedUrl });
 
         if (ajaxResponse) {
-            // أ) استخراج السيرفرات المباشرة m3u8 من استجابة الـ POST
+            // أ) جلب روابط الـ m3u8
             const m3u8Pattern = /https?:\/\/[^\s"']+\.m3u8[^\s"']*/gi;
             let m3u8Match;
             while ((m3u8Match = m3u8Pattern.exec(ajaxResponse)) !== null) {
@@ -170,7 +170,7 @@ async function extractDirectGameHubStreams(imdbId) {
                 }
             }
 
-            // ب) استخراج السيرفرات المباشرة MP4 (مثل Boutique)
+            // ب) جلب روابط الـ MP4 (سيرفر Boutique)
             const mp4Pattern = /https?:\/\/[^\s"']+\.mp4[^\s"']*/gi;
             let mp4Match;
             while ((mp4Match = mp4Pattern.exec(ajaxResponse)) !== null) {
@@ -193,7 +193,7 @@ async function extractDirectGameHubStreams(imdbId) {
         }
     }
 
-    // 4. فحص كلاسيكي أخير لصفحة المشغل الأصلية
+    // 4. فحص احتياطي لكود الـ HTML الأساسي في حال توفر الروابط مباشرة بداخله
     const fallbackPattern = /https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/gi;
     let fallbackMatch;
     while ((fallbackMatch = fallbackPattern.exec(html)) !== null) {
@@ -230,12 +230,12 @@ module.exports = async function(req, res) {
             const type = streamMatch[1];
             const fullId = streamMatch[2];
             const parts = fullId.split(":");
-            const imdbId = parts[0]; // استخراج imdb ID المباشر للتشغيل الفوري (مثل tt1757678)
+            const imdbId = parts[0]; // استخراج الـ IMDb ID مباشرة للفتح الفوري (مثل tt1757678)
 
-            console.log("[ArabSeed] Fetching streams for: " + imdbId);
+            console.log("[ArabSeed] Fetching stream links for IMDb ID: " + imdbId);
             const rawStreams = await extractDirectGameHubStreams(imdbId);
             
-            // تهيئة الصيغة القياسية لستريمو لتدعم الفتح الفوري بداخل التطبيق
+            // صياغة الروابط لتعود بصيغة البث المباشر المتوافقة مع مشغل ستريمو الداخلي
             const streams = rawStreams.map(s => ({
                 name: "ArabSeed by Abdulluh.X",
                 title: `🎬 ${s.title}`,
@@ -249,7 +249,7 @@ module.exports = async function(req, res) {
                 }
             }));
 
-            console.log("[ArabSeed] Found " + streams.length + " streams");
+            console.log("[ArabSeed] Total streams successfully extracted: " + streams.length);
             return res.end(JSON.stringify({ streams }));
         } catch (e) {
             console.error("[ArabSeed] Error: " + e.message);
