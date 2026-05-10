@@ -20,7 +20,7 @@ const manifest = {
   idPrefixes: ["tt"]
 };
 
-// جلب الاسم من TMDB للبحث والتوجيه
+// جلب تفاصيل المادة من TMDB للبحث والتوجيه الاحتياطي
 async function getTmdbMeta(imdbId, type) {
   try {
     const tmdbType = type === "movie" ? "movie" : "tv";
@@ -44,21 +44,18 @@ async function getTmdbMeta(imdbId, type) {
   }
 }
 
-// توليد روابط البث المباشر بناءً على المعرفات والمشغل الفعلي للموقع (reviewrate)
+// بناء وتوجيه روابط البث المباشرة بناءً على السيرفر الفعلي للموقع (reviewrate)
 async function getAsdPicsStreams(imdbId, type, season, episode) {
   const meta = await getTmdbMeta(imdbId, type);
-  if (!meta) return [];
-
   const streams = [];
-  const queryTitle = meta.arabicTitle || meta.englishTitle;
 
-  // 1. رابط المشغل الرئيسي والمباشر الذي يستخدمه موقع عرب سيد (reviewrate)
-  // نقوم ببنائه بشكل ديناميكي لتفادي حظر كود الصفحة الأساسية
+  // 1. الرابط الفعلي والأساسي للمشغل التابع لعرب سيد (m.reviewrate.net)
+  // يتم بناؤه وتمريره مباشرة ليعمل داخل مشغل ستريمو أو مشغل خارجي
   const embedUrl = `https://m.reviewrate.net/watch/${imdbId}`; 
 
   streams.push({
     name: "Arabseed | عرب سيد",
-    title: `🎬 سيرفر المشاهدة الرئيسي (سريع)`,
+    title: `🎬 سيرفر المشاهدة الرئيسي (مباشر وسريع)`,
     url: embedUrl,
     behaviorHints: {
       notWebReady: false,
@@ -69,17 +66,20 @@ async function getAsdPicsStreams(imdbId, type, season, episode) {
     }
   });
 
-  // 2. رابط البحث المباشر في الموقع كـ Fallback في حال واجهت الشاشة حظر Cloudflare
-  const webSearchUrl = `https://asd.pics/home7/?story=${encodeURIComponent(queryTitle)}&do=search&subaction=search`;
-  
-  streams.push({
-    name: "Arabseed | المتصفح",
-    title: `🌐 افتح صفحة المادة مباشرة في المتصفح`,
-    externalUrl: webSearchUrl,
-    behaviorHints: {
-      notWebReady: false
-    }
-  });
+  // 2. توفير خيار البحث المباشر في المتصفح لتفادي مشاكل الحظر المؤقت
+  if (meta) {
+    const queryTitle = meta.arabicTitle || meta.englishTitle;
+    const webSearchUrl = `https://asd.pics/home7/?story=${encodeURIComponent(queryTitle)}&do=search&subaction=search`;
+    
+    streams.push({
+      name: "Arabseed | المتصفح",
+      title: `🌐 افتح صفحة المادة مباشرة في المتصفح`,
+      externalUrl: webSearchUrl,
+      behaviorHints: {
+        notWebReady: false
+      }
+    });
+  }
 
   return streams;
 }
