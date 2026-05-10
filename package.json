@@ -1,9 +1,18 @@
 {
   "name": "asdpics-stremio",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "description": "Stremio addon for Asd Pics and Arabseed",
   "main": "api/index.js",
   "scripts": {
     "start": "node api/index.js"
   },
-  "dependencies": {}
+  "dependencies": {
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": "24.x"
+  }
 }
