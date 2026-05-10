@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "Stremio Addon for scraping Asd Pics media using Express and Cheerio",
   "main": "index.js",
-  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
@@ -11,7 +10,7 @@
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "cheerio": "^1.0.0-rc.12",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^2.7.0"
   },
   "engines": {
     "node": "24.x"
