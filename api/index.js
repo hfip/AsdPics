@@ -1,21 +1,48 @@
-const https = require("https");
-const http = require("http");
+const express = require("express");
+const cors = require("cors");
+const { load } = require("cheerio");
 
+// حل توافقية node-fetch مع نظام require التقليدي في بيئة Vercel
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+
+const app = express();
+app.use(cors());
+
+const PORT = process.env.PORT || 7001;
 const BASE_URL = "https://asd.pics";
 const TMDB_KEY = "f090bb54758cabaf2312cdbf31fa6e55";
 
-const HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-  "Accept-Language": "ar,en;q=0.9",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Referer": "https://asd.pics/"
-};
+const pageCache = new Map();
+const PAGE_TTL = 5 * 60 * 1000;
+
+async function fetchHtml(url) {
+  const cached = pageCache.get(url);
+  if (cached && Date.now() - cached.ts < PAGE_TTL) return cached.html;
+
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "ar,en-US;q=0.7,en;q=0.3",
+        "Referer": BASE_URL,
+      },
+      timeout: 8000
+    });
+    const html = await res.text();
+    pageCache.set(url, { html, ts: Date.now() });
+    return html;
+  } catch (err) {
+    console.error("[-] خطأ أثناء جلب الصفحة المحددة:", err);
+    return null;
+  }
+}
 
 const manifest = {
   id: "community.asdpics.abdulluhx",
   version: "1.1.0",
   name: "Asd Pics by Abdulluh.X",
-  description: "إضافة لسحب البث والروابط من موقع Asd Pics ومصادر عرب سيد مباشرة",
+  description: "إضافة لمتابعة وسحب الأفلام والمسلسلات والكتالوجات من موقع Asd Pics ومصادر عرب سيد مباشرة",
   logo: "https://asd.pics/templates/Default/images/logo.png",
   resources: ["stream"],
   types: ["movie", "series"],
@@ -23,183 +50,108 @@ const manifest = {
   idPrefixes: ["tt"]
 };
 
-function fetchText(url) {
-  return new Promise((resolve) => {
-    const client = url.startsWith("https") ? https : http;
-    const timer = setTimeout(() => resolve(""), 8000);
-    try {
-      const req = client.get(url, { headers: HEADERS }, (res) => {
-        const chunks = [];
-        res.on("data", c => chunks.push(c));
-        res.on("end", () => {
-          clearTimeout(timer);
-          resolve(Buffer.concat(chunks).toString("utf-8"));
-        });
-      });
-      req.on("error", () => { clearTimeout(timer); resolve(""); });
-    } catch (e) { clearTimeout(timer); resolve(""); }
-  });
-}
-
-function fetchJson(url) {
-  return new Promise((resolve) => {
-    const client = url.startsWith("https") ? https : http;
-    const timer = setTimeout(() => resolve({}), 8000);
-    try {
-      const req = client.get(url, {
-        headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
-      }, (res) => {
-        let data = "";
-        res.on("data", c => data += c);
-        res.on("end", () => {
-          clearTimeout(timer);
-          try { resolve(JSON.parse(data)); } catch (e) { resolve({}); }
-        });
-      });
-      req.on("error", () => { clearTimeout(timer); resolve({}); });
-    } catch (e) { clearTimeout(timer); resolve({}); }
-  });
-}
-
-// جلب الاسم العربي للفيلم أو المسلسل من TMDB
+// جلب الاسم العربي للفيلم أو المسلسل من قاعدة بيانات TMDB
 async function getTmdbMeta(imdbId, type) {
-  const tmdbType = type === "movie" ? "movie" : "tv";
-  const data = await fetchJson(
-    "https://api.themoviedb.org/3/find/" + imdbId +
-    "?api_key=" + TMDB_KEY + "&external_source=imdb_id"
-  );
-  
-  const result = (data.movie_results && data.movie_results[0]) || (data.tv_results && data.tv_results[0]);
-  if (!result) return null;
-  
-  const tmdbId = result.id;
-  const arData = await fetchJson(
-    "https://api.themoviedb.org/3/" + tmdbType + "/" + tmdbId +
-    "?api_key=" + TMDB_KEY + "&language=ar-SA"
-  );
-  
-  return {
-    arabicTitle: arData.name || arData.title || result.name || result.title || ""
-  };
+  try {
+    const tmdbType = type === "movie" ? "movie" : "tv";
+    const tmdbUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_KEY}&external_source=imdb_id&language=ar-SA`;
+    const res = await fetch(tmdbUrl);
+    const data = await res.json();
+    
+    const result = (data.movie_results && data.movie_results[0]) || (data.tv_results && data.tv_results[0]);
+    if (!result) return null;
+    
+    const detailsUrl = `https://api.themoviedb.org/3/${tmdbType}/${result.id}?api_key=${TMDB_KEY}&language=ar-SA`;
+    const detailsRes = await fetch(detailsUrl);
+    const arData = await detailsRes.json();
+    
+    return {
+      arabicTitle: arData.name || arData.title || result.name || result.title || ""
+    };
+  } catch (e) {
+    console.error("[-] فشل جلب الاسم العربي من TMDB:", e);
+    return null;
+  }
 }
 
-// دالة محسنة للبحث ومطابقة النتائج داخل Asd Pics
+// البحث في موقع Asd Pics ومطابقة العناوين
 async function searchAsdPics(arabicTitle, type, episode) {
   if (!arabicTitle) return null;
-  
-  // تنظيف النص لضمان تطابق أفضل في البحث داخل الموقع
   const cleanTitle = arabicTitle.replace(/[^\u0600-\u06FFa-zA-Z0-9\s]/g, "").trim();
-  const searchUrl = BASE_URL + "/home7/?story=" + encodeURIComponent(cleanTitle) + "&do=search&subaction=search";
-  const html = await fetchText(searchUrl);
+  const searchUrl = `${BASE_URL}/home7/?story=${encodeURIComponent(cleanTitle)}&do=search&subaction=search`;
+  
+  const html = await fetchHtml(searchUrl);
   if (!html) return null;
 
-  const linkPattern = /href="(https?:\/\/asd\.pics\/[^"]+)"/gi;
-  let m;
+  const $ = load(html);
   const candidates = [];
 
-  while ((m = linkPattern.exec(html)) !== null) {
-    const url = m[1];
-    const decoded = decodeURIComponent(url);
-    // تصفية الروابط لاستخراج مسارات الأفلام والمسلسلات الحقيقية فقط واستبعاد الروابط الجانبية
-    if (decoded.includes("/movies/") || decoded.includes("/series/") || decoded.includes("/home7/")) {
-      if (!candidates.includes(url)) {
-        candidates.push(url);
+  $("a").each((_i, el) => {
+    const href = $(el).attr("href");
+    if (href && (href.includes("/movies/") || href.includes("/series/") || href.includes("/home7/"))) {
+      if (!candidates.includes(href)) {
+        candidates.push(href);
       }
     }
-  }
+  });
 
   if (candidates.length === 0) return null;
-
   let matchedUrl = candidates[0];
 
-  // إذا كان مسلسل، نبحث داخل الصفحة الأساسية عن رابط الحلقة المحددة
+  // للمسلسلات، نبحث عن صفحة الحلقة المحددة
   if (type === "series" && episode && matchedUrl) {
-    const pageHtml = await fetchText(matchedUrl);
+    const pageHtml = await fetchHtml(matchedUrl);
     if (pageHtml) {
-      const epPattern = /href="(https?:\/\/asd\.pics\/[^"]+)"/gi;
-      let epMatch;
-      while ((epMatch = epPattern.exec(pageHtml)) !== null) {
-        const epUrl = epMatch[1];
-        const decodedEp = decodeURIComponent(epUrl);
-        // التحقق من رقم الحلقة بصيغ متعددة
-        if (
-          decodedEp.includes("الحلقة-" + episode + "-") || 
-          decodedEp.includes("الحلقة-" + episode + "/") ||
-          decodedEp.endsWith("الحلقة-" + episode) ||
-          decodedEp.includes("الحلقة " + episode)
-        ) {
+      const $page = load(pageHtml);
+      $page("a").each((_i, el) => {
+        const epUrl = $page(el).attr("href");
+        const epText = $page(el).text().trim();
+        if (epUrl && (epText.includes(`الحلقة ${episode}`) || epText.includes(`الحلقة-${episode}`))) {
           matchedUrl = epUrl;
-          break;
+          return false;
         }
-      }
+      });
     }
   }
 
   return matchedUrl;
 }
 
-// استخراج مصادر البث والمشغلات مع دعم السيرفرات الخارجية النشطة
+// استخراج روابط التشغيل البث بصيغ m3u8 و mp4 والمصادر الأخرى
 async function extractStreams(pageUrl) {
-  const html = await fetchText(pageUrl);
+  const html = await fetchHtml(pageUrl);
   if (!html) return [];
 
+  const $ = load(html);
   const streams = [];
   const seen = new Set();
 
-  const videoPatterns = [
-    /(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/gi,
-    /(https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*)/gi,
-    /(https?:\/\/[^\s"'<>]*boutique[^\s"'<>]*)/gi,
-    /(https?:\/\/[^\s"'<>]*tnmr\.org[^\s"'<>]*)/gi,
-    /(https?:\/\/[^\s"'<>]*vmwesa\.online[^\s"'<>]*)/gi,
-    /(https?:\/\/[^\s"'<>]*r66nv9ed\.com[^\s"'<>]*)/gi
-  ];
+  $("iframe, a, source, video, button").each((_i, el) => {
+    let src = $(el).attr("src") || $(el).attr("href") || $(el).attr("data-src") || $(el).attr("data-link");
 
-  for (const pattern of videoPatterns) {
-    let m;
-    while ((m = pattern.exec(html)) !== null) {
-      let url = m[1];
-      if (url.endsWith(")") || url.endsWith("'") || url.endsWith('"')) {
-        url = url.slice(0, -1);
-      }
-      if (!seen.has(url)) {
-        seen.add(url);
-        const isHls = url.includes(".m3u8");
-        streams.push({
-          url: url,
-          title: `سيرفر خاص (${isHls ? "HLS/M3U8" : "MP4"})`
-        });
-      }
-    }
-  }
+    if (src) {
+      if (src.startsWith("//")) src = `https:${src}`;
+      if (src.startsWith("/")) src = `${BASE_URL}${src}`;
 
-  // فحص الـ iframes المدمجة (سيرفرات المشاهدة السريعة)
-  const iframePattern = /<iframe[^>]*src=["'](https?:\/\/[^"']+)["']/gi;
-  let iframeMatch;
-  while ((iframeMatch = iframePattern.exec(html)) !== null) {
-    const src = iframeMatch[1];
-    if (seen.has(src)) continue;
-    if (["google", "facebook", "ads", "gravatar"].some(x => src.includes(x))) continue;
-    seen.add(src);
-
-    const embedHtml = await fetchText(src);
-    if (embedHtml) {
-      for (const pattern of videoPatterns) {
-        let embedVideo;
-        while ((embedVideo = pattern.exec(embedHtml)) !== null) {
-          const url = embedVideo[1];
-          if (!seen.has(url)) {
-            seen.add(url);
-            const isHls = url.includes(".m3u8");
-            streams.push({ 
-              url: url, 
-              title: `سيرفر مدمج (${isHls ? "HLS/M3U8" : "MP4"})` 
-            });
-          }
+      if (
+        src.includes(".m3u8") || 
+        src.includes(".mp4") || 
+        src.includes("boutique") || 
+        src.includes("tnmr.org") || 
+        src.includes("vmwesa.online") || 
+        src.includes("r66nv9ed.com")
+      ) {
+        if (!seen.has(src)) {
+          seen.add(src);
+          const isHls = src.includes(".m3u8");
+          streams.push({
+            url: src,
+            title: `سيرفر خاص (${isHls ? "HLS/M3U8" : "MP4"})`
+          });
         }
       }
     }
-  }
+  });
 
   return streams;
 }
@@ -207,29 +159,24 @@ async function extractStreams(pageUrl) {
 async function getAsdPicsStreams(imdbId, type, season, episode) {
   const meta = await getTmdbMeta(imdbId, type);
   if (!meta || !meta.arabicTitle) {
-    console.log("[AsdPics] No Arabic title for: " + imdbId);
+    console.log("[AsdPics] No Arabic title found for IMDB ID: " + imdbId);
     return [];
   }
 
-  console.log("[AsdPics] Searching for: " + meta.arabicTitle + " (E" + episode + ")");
+  console.log("[AsdPics] Searching title: " + meta.arabicTitle + " (E" + episode + ")");
 
   const pageUrl = await searchAsdPics(meta.arabicTitle, type, episode);
   if (!pageUrl) {
-    console.log("[AsdPics] Content page not found");
+    console.log("[AsdPics] Episode Page not found");
     return [];
   }
 
   console.log("[AsdPics] Found Page URL: " + pageUrl);
-
   const rawStreams = await extractStreams(pageUrl);
-  if (rawStreams.length === 0) {
-    console.log("[AsdPics] No valid streams extracted");
-    return [];
-  }
 
   return rawStreams.map(s => ({
     name: "Asd Pics by Abdulluh.X",
-    title: s.title + " | جودة متعددة 🌐",
+    title: `${s.title} | جودة متعددة 🌐`,
     url: s.url,
     behaviorHints: {
       notWebReady: false,
@@ -238,37 +185,32 @@ async function getAsdPicsStreams(imdbId, type, season, episode) {
   }));
 }
 
-module.exports = async function(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "*");
-  res.setHeader("Content-Type", "application/json");
+// توجيه الطلبات
+app.get("/manifest.json", (req, res) => {
+  res.json(manifest);
+});
 
-  const url = req.url || "/";
+app.get("/", (req, res) => {
+  res.json(manifest);
+});
 
-  if (url === "/" || url.includes("/manifest.json")) {
-    return res.end(JSON.stringify(manifest));
+app.get("/stream/:type/:id.json", async (req, res) => {
+  const { type, id } = req.params;
+  const parts = id.split(":");
+  const imdbId = parts[0];
+  const season = parseInt(parts[1] || "1");
+  const episode = parseInt(parts[2] || "1");
+
+  console.log("[AsdPics] Request for: " + imdbId + " S" + season + "E" + episode);
+
+  try {
+    const streams = await getAsdPicsStreams(imdbId, type, season, episode);
+    console.log("[AsdPics] Found streams count: " + streams.length);
+    res.json({ streams });
+  } catch (e) {
+    console.error("[AsdPics] Error occurred: " + e.message);
+    res.json({ streams: [] });
   }
+});
 
-  const streamMatch = url.match(/\/stream\/(series|movie)\/(.+)\.json/);
-  if (streamMatch) {
-    try {
-      const type = streamMatch[1];
-      const fullId = streamMatch[2];
-      const parts = fullId.split(":");
-      const imdbId = parts[0];
-      const season = parseInt(parts[1] || "1");
-      const episode = parseInt(parts[2] || "1");
-
-      console.log("[AsdPics] Handling request for ID: " + imdbId);
-      const streams = await getAsdPicsStreams(imdbId, type, season, episode);
-      console.log("[AsdPics] Total streams found: " + streams.length);
-      return res.end(JSON.stringify({ streams }));
-    } catch (e) {
-      console.error("[AsdPics] Server Error: " + e.message);
-      return res.end(JSON.stringify({ streams: [] }));
-    }
-  }
-
-  res.statusCode = 404;
-  res.end(JSON.stringify({ error: "Not found" }));
-};
+module.exports = app;
