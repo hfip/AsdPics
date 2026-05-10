@@ -9,7 +9,7 @@ app.use(cors());
 const PORT = process.env.PORT || 7000;
 const BASE_URL = "https://asd.pics";
 
-// ─── إعدادات الذاكرة المؤقتة (Cache) لتسريع الأداء وتفادي الحظر ───
+// ─── نظام الذاكرة المؤقتة (Cache) لتجنب الحظر وتسريع الاستجابة ───
 const pageCache = new Map();
 const PAGE_TTL = 5 * 60 * 1000; // 5 دقائق
 
@@ -31,67 +31,192 @@ async function fetchHtml(url) {
     pageCache.set(url, { html, ts: Date.now() });
     return html;
   } catch (err) {
-    console.error("خطأ أثناء جلب الصفحة:", err);
+    console.error("[-] خطأ أثناء جلب الصفحة المحددة:", err);
     return null;
   }
 }
 
-// ─── مخرجات الـ Manifest الخاصة بإضافة Stremio ───
+// ─── 1. تعريف الـ Manifest (هوية الإضافة في ستريمو) ───
 app.get("/manifest.json", (req, res) => {
   res.json({
     id: "org.asdpics.addon",
     version: "1.0.0",
     name: "Asd Pics (عرب سيد)",
-    description: "إضافة لسحب البث والكتالوجات من موقع Asd Pics للمحتوى العربي والأجنبي",
-    resources: ["stream"],
+    description: "إضافة لمتابعة وسحب الأفلام والمسلسلات والكتالوجات من موقع Asd Pics وعرب سيد مباشرة",
+    resources: ["catalog", "meta", "stream"],
     types: ["movie", "series"],
-    idPrefixes: ["tt"], // يدعم معرفات IMDB القياسية ttXXXXXXX
+    idPrefixes: ["tt"], // لربط الإضافة ببيانات IMDB للبحث التلقائي
+    catalogs: [
+      {
+        id: "asd_arabic_movies",
+        type: "movie",
+        name: "Asd Pics - أفلام عربية",
+        extra: [{ name: "search", isRequired: false }]
+      },
+      {
+        id: "asd_arabic_series",
+        type: "series",
+        name: "Asd Pics - مسلسلات عربية",
+        extra: [{ name: "search", isRequired: false }]
+      }
+    ],
     background: "https://asd.pics/templates/Default/images/logo.png",
     logo: "https://asd.pics/templates/Default/images/logo.png",
   });
 });
 
-// ─── مسار جلب روابط البث (Stream Handler) ───
-app.get("/stream/:type/:id.json", async (req, res) => {
+// ─── 2. معالج الكاتالوجات (Catalog Handler) ───
+// يعرض المحتوى للمستخدم في واجهة ستريمو الرئيسية ويسمح بالبحث
+app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
   const { type, id } = req.params;
-  
-  // فك ترميز المعرف (مثال لـ IMDB: tt1234567:1:5 للمسلسلات أو tt1234567 للأفلام)
-  const parts = id.split(":");
-  const imdbId = parts[0];
-  const season = parts[1];
-  const episode = parts[2];
+  const extra = req.params.extra ? Object.fromEntries(new URLSearchParams(req.params.extra)) : {};
+  const searchQuery = extra.search;
 
-  console.log(`[+] طلب بث جديد لـ: ${type} | معرف: ${imdbId} | موسم: ${season} | حلقة: ${episode}`);
+  let targetUrl = `${BASE_URL}/home7/`;
+
+  // إذا كان هناك طلب بحث من المستخدم داخل ستريمو
+  if (searchQuery) {
+    targetUrl = `${BASE_URL}/home7/?story=${encodeURIComponent(searchQuery)}&do=search&subaction=search`;
+  }
 
   try {
-    // 1. جلب اسم الفيلم أو المسلسل باللغة العربية عبر TMDB API لضمان مطابقة البحث في الموقع العربي
+    const html = await fetchHtml(targetUrl);
+    if (!html) return res.json({ metas: [] });
+
+    const $ = load(html);
+    const metas = [];
+
+    // سحب الأفلام والمسلسلات المعروضة في الصفحة لبناء الكاتالوج
+    // تم ضبط المحدّدات (Selectors) لتتوافق مع تصميم صفحات الموقع
+    $(".card, .post, .shortstory, a").each((_i, el) => {
+      const title = $(el).find(".card__title, .post-title, h2").text().trim() || $(el).text().trim();
+      const href = $(el).attr("href") || $(el).find("a").attr("href");
+      let poster = $(el).find("img").attr("src") || $(el).find("img").attr("data-src");
+
+      if (href && title && (href.includes("/movies/") || href.includes("/series/") || href.includes("home7"))) {
+        if (poster && poster.startsWith("/")) poster = `${BASE_URL}${poster}`;
+        
+        // توليد معرف داخلي مؤقت لتمريره لصفحة الميتا
+        const slug = href.replace(BASE_URL, "").replace(/\//g, "_");
+
+        metas.push({
+          id: `asd:${type}:${slug}`, // تركيب المعرف لتمريره للخطوات القادمة
+          type: type,
+          name: title,
+          poster: poster || "https://asd.pics/templates/Default/images/logo.png",
+          background: poster || "https://asd.pics/templates/Default/images/logo.png",
+        });
+      }
+    });
+
+    // فلترة النتائج المتكررة لضمان واجهة نظيفة
+    const uniqueMetas = metas.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
+    res.json({ metas: uniqueMetas });
+  } catch (err) {
+    console.error("[-] خطأ في معالجة الكاتالوج:", err);
+    res.json({ metas: [] });
+  }
+});
+
+// ─── 3. معالج الميتا (Meta Handler) ───
+// يجلب تفاصيل العمل المختار والبوستر وقائمة الحلقات إذا كان مسلسلاً
+app.get("/meta/:type/:id.json", async (req, res) => {
+  const { type, id } = req.params;
+  
+  if (!id.startsWith("asd:")) {
+    return res.json({ meta: null });
+  }
+
+  const slug = id.split(":")[2].replace(/_/g, "/");
+  const targetUrl = `${BASE_URL}${slug}`;
+
+  try {
+    const html = await fetchHtml(targetUrl);
+    if (!html) return res.json({ meta: null });
+
+    const $ = load(html);
+    const title = $(".post-title, h1, title").text().trim();
+    let poster = $(".post-poster img, .poster img").attr("src");
+    if (poster && poster.startsWith("/")) poster = `${BASE_URL}${poster}`;
+
+    const videos = [];
+
+    // إذا كان نوع المحتوى مسلسلاً، نسحب الحلقات المتوفرة في الصفحة
+    if (type === "series") {
+      $("a").each((i, el) => {
+        const text = $(el).text().trim();
+        const href = $(el).attr("href");
+
+        if (href && (text.includes("الحلقة") || text.includes("حلقة"))) {
+          const epSlug = href.replace(BASE_URL, "").replace(/\//g, "_");
+          videos.push({
+            id: `asd:series:${epSlug}`,
+            title: text,
+            season: 1, // افتراضي
+            episode: i + 1,
+            released: new Date().toISOString(),
+          });
+        }
+      });
+    }
+
+    res.json({
+      meta: {
+        id,
+        type,
+        name: title,
+        poster: poster || "https://asd.pics/templates/Default/images/logo.png",
+        background: poster || "https://asd.pics/templates/Default/images/logo.png",
+        description: "مشاهدة مباشرة بجودة عالية عبر سيرفرات متعددة.",
+        videos: type === "series" ? videos : undefined,
+      },
+    });
+  } catch (err) {
+    console.error("[-] خطأ في جلب بيانات الميتا:", err);
+    res.status(500).json({ meta: null });
+  }
+});
+
+// ─── 4. معالج البث المباشر (Stream Handler) ───
+// يستخرج روابط الفيديو بصيغ mp4 أو m3u8 من داخل صفحة المشاهدة
+app.get("/stream/:type/:id.json", async (req, res) => {
+  const { type, id } = req.params;
+
+  let targetUrl = "";
+
+  // التحقق من نوع المعرّف (سواء كان قادماً من كتالوج الإضافة أو بحث IMDB الخارجي)
+  if (id.startsWith("asd:")) {
+    const slug = id.split(":")[2].replace(/_/g, "/");
+    targetUrl = `${BASE_URL}${slug}`;
+  } else {
+    // في حال ضغط المستخدم على الفيلم من خارج كتالوج الإضافة (باستخدام معرف IMDB)
+    const parts = id.split(":");
+    const imdbId = parts[0];
     const mediaName = await getArabicNameFromTMDB(imdbId, type);
-    if (!mediaName) {
-      return res.json({ streams: [] });
+    
+    if (mediaName) {
+      targetUrl = `${BASE_URL}/home7/?story=${encodeURIComponent(mediaName)}&do=search&subaction=search`;
     }
+  }
 
-    // 2. البحث عن الصفحة الخاصة بالمحتوى داخل الموقع
-    const targetPageUrl = await searchInSite(mediaName, type, season, episode);
-    if (!targetPageUrl) {
-       return res.json({ streams: [] });
-    }
+  if (!targetUrl) return res.json({ streams: [] });
 
-    // 3. تحليل الصفحة وجلب روابط البث (mp4 و m3u8)
-    const html = await fetchHtml(targetPageUrl);
+  try {
+    const html = await fetchHtml(targetUrl);
     if (!html) return res.json({ streams: [] });
 
     const $ = load(html);
     const streams = [];
 
-    // فحص جميع عناصر الفيديو، المشغلات، الروابط، والإطارات في الصفحة
-    $("iframe, a, source, video").each((_i, el) => {
+    // مسح وتحليل كافة الوسائط والمشغلات في الصفحة لاستخراج m3u8 و mp4
+    $("iframe, a, source, video, button").each((_i, el) => {
       let src = $(el).attr("src") || $(el).attr("href") || $(el).attr("data-src") || $(el).attr("data-link");
-      
+
       if (src) {
         if (src.startsWith("//")) src = `https:${src}`;
         if (src.startsWith("/")) src = `${BASE_URL}${src}`;
 
-        // فلترة الروابط المستهدفة بناءً على المصادر المرفقة وسيرفرات البث المعروفة للموقع
+        // فلترة الروابط ومطابقتها مع سيرفرات البث النشطة للموقع
         if (
           src.includes(".m3u8") || 
           src.includes(".mp4") || 
@@ -100,12 +225,13 @@ app.get("/stream/:type/:id.json", async (req, res) => {
           src.includes("vmwesa.online") || 
           src.includes("r66nv9ed.com")
         ) {
+          const isHls = src.includes("m3u8");
           streams.push({
-            title: `🎬 Asd Pics - جودة متعددة (${src.includes("mp4") ? "MP4" : "HLS/M3U8"})`,
+            title: `🎬 Asd Pics - جودة متعددة (${isHls ? "HLS/M3U8" : "MP4 المباشر"})`,
             url: src,
             behaviorHints: {
-              notWebReady: !src.includes("mp4"), // روابط HLS تحتاج مشغل خارجي في بعض الأجهزة
-              referer: targetPageUrl
+              notWebReady: isHls, // روابط m3u8 تحتاج مشغلات متوافقة مثل VLC أو ExoPlayer خارجي
+              referer: targetUrl
             }
           });
         }
@@ -114,16 +240,15 @@ app.get("/stream/:type/:id.json", async (req, res) => {
 
     res.json({ streams });
   } catch (err) {
-    console.error("حدث خطأ أثناء معالجة البث:", err);
+    console.error("[-] خطأ أثناء توليد مسارات البث:", err);
     res.status(500).json({ streams: [] });
   }
 });
 
-// ─── دالة جلب الاسم العربي من TMDB ───
+// دالة مساعدة لجلب الاسم من قاعدة بيانات TMDB عند البحث بالـ IMDB ID
 async function getArabicNameFromTMDB(imdbId, type) {
   try {
     const tmdbType = type === "movie" ? "movie" : "tv";
-    // استخدام مفتاح TMDB عام أو يمكنك استبداله بمفتاحك الخاص
     const tmdbUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=f090bb54758cabaf2312cdbf31fa6e55&external_source=imdb_id&language=ar`;
     
     const res = await fetch(tmdbUrl);
@@ -134,53 +259,11 @@ async function getArabicNameFromTMDB(imdbId, type) {
       return results[0].title || results[0].name;
     }
   } catch (e) {
-    console.error("فشل جلب الاسم من TMDB:", e);
+    console.error("[-] فشل جلب الاسم العربي من TMDB:", e);
   }
   return null;
 }
 
-// ─── دالة البحث داخل الموقع للحصول على رابط الصفحة المباشر ───
-async function searchInSite(keyword, type, season, episode) {
-  // صياغة رابط البحث المناسب لمحرك بحث الموقع
-  const searchUrl = `${BASE_URL}/home7/?story=${encodeURIComponent(keyword)}&do=search&subaction=search`;
-  const html = await fetchHtml(searchUrl);
-  if (!html) return null;
-
-  const $ = load(html);
-  let matchedUrl = null;
-
-  // البحث عن أول رابط مقال أو تدوينة يطابق اسم المحتوى
-  $("a").each((_i, el) => {
-    const text = $(el).text().trim().toLowerCase();
-    const href = $(el).attr("href");
-
-    if (href && text.includes(keyword.toLowerCase())) {
-      matchedUrl = href;
-      return false; // إيقاف البحث عند أول نتيجة متوافقة
-    }
-  });
-
-  // إذا كان مسلسلاً، نحاول توجيه الرابط لصفحة الحلقة مباشرة
-  if (matchedUrl && type === "series" && episode) {
-    const pageHtml = await fetchHtml(matchedUrl);
-    if (pageHtml) {
-      const $page = load(pageHtml);
-      $page("a").each((_i, el) => {
-        const linkText = $page(el).text().trim();
-        const linkHref = $page(el).attr("href");
-        
-        // البحث عن الحلقة المطلوبة في الصفحة (مثل: "الحلقة 5" أو "الحلقة الخامسة" أو صيغة "1x5")
-        if (linkHref && (linkText.includes(`الحلقة ${episode}`) || linkText.includes(`${season}x${episode}`))) {
-          matchedUrl = linkHref;
-          return false;
-        }
-      });
-    }
-  }
-
-  return matchedUrl;
-}
-
 app.listen(PORT, () => {
-  console.log(`Addon successfully running on port ${PORT}`);
+  console.log(`[+] Addon is active and running on port ${PORT}`);
 });
