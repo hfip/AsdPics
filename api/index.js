@@ -1,7 +1,7 @@
-import express from "express";
-import cors from "cors";
-import { load } from "cheerio";
-import fetch from "node-fetch";
+const express = require("express");
+const cors = require("cors");
+const { load } = require("cheerio");
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const app = express();
 app.use(cors());
@@ -66,15 +66,13 @@ app.get("/manifest.json", (req, res) => {
 });
 
 // ─── 2. معالج الكاتالوجات (Catalog Handler) ───
-// يعرض المحتوى للمستخدم في واجهة ستريمو الرئيسية ويسمح بالبحث
 app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
-  const { type, id } = req.params;
+  const { type } = req.params;
   const extra = req.params.extra ? Object.fromEntries(new URLSearchParams(req.params.extra)) : {};
   const searchQuery = extra.search;
 
   let targetUrl = `${BASE_URL}/home7/`;
 
-  // إذا كان هناك طلب بحث من المستخدم داخل ستريمو
   if (searchQuery) {
     targetUrl = `${BASE_URL}/home7/?story=${encodeURIComponent(searchQuery)}&do=search&subaction=search`;
   }
@@ -86,8 +84,6 @@ app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
     const $ = load(html);
     const metas = [];
 
-    // سحب الأفلام والمسلسلات المعروضة في الصفحة لبناء الكاتالوج
-    // تم ضبط المحدّدات (Selectors) لتتوافق مع تصميم صفحات الموقع
     $(".card, .post, .shortstory, a").each((_i, el) => {
       const title = $(el).find(".card__title, .post-title, h2").text().trim() || $(el).text().trim();
       const href = $(el).attr("href") || $(el).find("a").attr("href");
@@ -96,11 +92,10 @@ app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
       if (href && title && (href.includes("/movies/") || href.includes("/series/") || href.includes("home7"))) {
         if (poster && poster.startsWith("/")) poster = `${BASE_URL}${poster}`;
         
-        // توليد معرف داخلي مؤقت لتمريره لصفحة الميتا
         const slug = href.replace(BASE_URL, "").replace(/\//g, "_");
 
         metas.push({
-          id: `asd:${type}:${slug}`, // تركيب المعرف لتمريره للخطوات القادمة
+          id: `asd:${type}:${slug}`,
           type: type,
           name: title,
           poster: poster || "https://asd.pics/templates/Default/images/logo.png",
@@ -109,7 +104,6 @@ app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
       }
     });
 
-    // فلترة النتائج المتكررة لضمان واجهة نظيفة
     const uniqueMetas = metas.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
     res.json({ metas: uniqueMetas });
   } catch (err) {
@@ -119,7 +113,6 @@ app.get("/catalog/:type/:id/:extra?.json", async (req, res) => {
 });
 
 // ─── 3. معالج الميتا (Meta Handler) ───
-// يجلب تفاصيل العمل المختار والبوستر وقائمة الحلقات إذا كان مسلسلاً
 app.get("/meta/:type/:id.json", async (req, res) => {
   const { type, id } = req.params;
   
@@ -141,7 +134,6 @@ app.get("/meta/:type/:id.json", async (req, res) => {
 
     const videos = [];
 
-    // إذا كان نوع المحتوى مسلسلاً، نسحب الحلقات المتوفرة في الصفحة
     if (type === "series") {
       $("a").each((i, el) => {
         const text = $(el).text().trim();
@@ -152,7 +144,7 @@ app.get("/meta/:type/:id.json", async (req, res) => {
           videos.push({
             id: `asd:series:${epSlug}`,
             title: text,
-            season: 1, // افتراضي
+            season: 1,
             episode: i + 1,
             released: new Date().toISOString(),
           });
@@ -178,18 +170,15 @@ app.get("/meta/:type/:id.json", async (req, res) => {
 });
 
 // ─── 4. معالج البث المباشر (Stream Handler) ───
-// يستخرج روابط الفيديو بصيغ mp4 أو m3u8 من داخل صفحة المشاهدة
 app.get("/stream/:type/:id.json", async (req, res) => {
   const { type, id } = req.params;
 
   let targetUrl = "";
 
-  // التحقق من نوع المعرّف (سواء كان قادماً من كتالوج الإضافة أو بحث IMDB الخارجي)
   if (id.startsWith("asd:")) {
     const slug = id.split(":")[2].replace(/_/g, "/");
     targetUrl = `${BASE_URL}${slug}`;
   } else {
-    // في حال ضغط المستخدم على الفيلم من خارج كتالوج الإضافة (باستخدام معرف IMDB)
     const parts = id.split(":");
     const imdbId = parts[0];
     const mediaName = await getArabicNameFromTMDB(imdbId, type);
@@ -208,7 +197,6 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     const $ = load(html);
     const streams = [];
 
-    // مسح وتحليل كافة الوسائط والمشغلات في الصفحة لاستخراج m3u8 و mp4
     $("iframe, a, source, video, button").each((_i, el) => {
       let src = $(el).attr("src") || $(el).attr("href") || $(el).attr("data-src") || $(el).attr("data-link");
 
@@ -216,7 +204,6 @@ app.get("/stream/:type/:id.json", async (req, res) => {
         if (src.startsWith("//")) src = `https:${src}`;
         if (src.startsWith("/")) src = `${BASE_URL}${src}`;
 
-        // فلترة الروابط ومطابقتها مع سيرفرات البث النشطة للموقع
         if (
           src.includes(".m3u8") || 
           src.includes(".mp4") || 
@@ -230,7 +217,7 @@ app.get("/stream/:type/:id.json", async (req, res) => {
             title: `🎬 Asd Pics - جودة متعددة (${isHls ? "HLS/M3U8" : "MP4 المباشر"})`,
             url: src,
             behaviorHints: {
-              notWebReady: isHls, // روابط m3u8 تحتاج مشغلات متوافقة مثل VLC أو ExoPlayer خارجي
+              notWebReady: isHls,
               referer: targetUrl
             }
           });
@@ -245,10 +232,8 @@ app.get("/stream/:type/:id.json", async (req, res) => {
   }
 });
 
-// دالة مساعدة لجلب الاسم من قاعدة بيانات TMDB عند البحث بالـ IMDB ID
 async function getArabicNameFromTMDB(imdbId, type) {
   try {
-    const tmdbType = type === "movie" ? "movie" : "tv";
     const tmdbUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=f090bb54758cabaf2312cdbf31fa6e55&external_source=imdb_id&language=ar`;
     
     const res = await fetch(tmdbUrl);
