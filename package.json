@@ -1,18 +1,9 @@
 {
-  "name": "qeseh-stremio-addon",
-  "version": "1.1.0",
-  "description": "Stremio addon for qeseh.net — Turkish dramas dubbed in Arabic (with m3u8 streams)",
-  "main": "index.js",
+  "name": "asdpics-stremio",
+  "version": "1.0.0",
+  "main": "api/index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node api/index.js"
   },
-  "dependencies": {
-    "cheerio": "^1.0.0",
-    "cors": "^2.8.5",
-    "express": "^5.0.0",
-    "node-fetch": "^2.7.0"
-  },
-  "engines": {
-    "node": "24.x"
-  }
+  "dependencies": {}
 }
