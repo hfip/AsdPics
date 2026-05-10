@@ -10,20 +10,21 @@ app.use(cors());
 const PORT = process.env.PORT || 7001;
 const WATCH_BASE = "https://m.reviewrate.net";
 
-// استخدام البروكسي لتجاوز جدار حماية Cloudflare الخاص بعرب سيد في Vercel
-const PROXY_URL = "https://api.allorigins.win/raw?url=";
-
-const HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-  "Accept-Language": "ar,en-US;q=0.7,en;q=0.3"
+// إعداد الهيدرز المطابقة تماماً لتطبيق كلاود ستريم لضمان تجاوز الفلترة
+const EXACT_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+  "Cache-Control": "no-cache",
+  "Pragma": "no-cache",
+  "Upgrade-Insecure-Requests": "1"
 };
 
 const manifest = {
   id: "community.asdpics.abdulluhx",
-  version: "2.0.0",
+  version: "2.1.0",
   name: "Asd Pics by Abdulluh.X",
-  description: "إضافة متطورة لسحب وتشغيل البث المباشر (m3u8 و mp4) داخلياً وبدون خروج من ستريمو",
+  description: "سحب البث المباشر لروابط عرب سيد (m3u8 / mp4) وتشغيلها داخلياً في ستريمو",
   logo: "https://asd.pics/templates/Default/images/logo.png",
   resources: ["stream"],
   types: ["movie", "series"],
@@ -31,60 +32,67 @@ const manifest = {
   idPrefixes: ["tt"]
 };
 
-// جلب كود الصفحة الأساسية عبر البروكسي
-async function fetchHtmlViaProxy(url, referer = WATCH_BASE) {
+// دالة جلب كود HTML الخاص بصفحة المشغل الرئيسي
+async function getWatchPageHtml(embedUrl) {
   try {
-    const targetUrl = PROXY_URL + encodeURIComponent(url);
-    const res = await fetch(targetUrl, {
+    const res = await fetch(embedUrl, {
       headers: {
-        ...HEADERS,
-        "Referer": referer
+        ...EXACT_HEADERS,
+        "Referer": "https://asd.pics/"
       },
-      timeout: 10000
+      timeout: 8000
     });
     return await res.text();
   } catch (err) {
-    console.error("[-] Connection failed:", err.message);
+    console.error("[-] Error loading watch page:", err.message);
     return null;
   }
 }
 
-// إرسال طلب الـ POST عبر البروكسي للحصول على استجابة الـ Ajax الحقيقية للسيرفرات
-async function postAjaxViaProxy(url, data, referer) {
+// دالة إرسال طلب الـ POST لاستخراج السيرفرات الفعلية (Ajax)
+async function getWatchServersAjax(postId, csrfToken, embedUrl) {
   try {
-    const formBody = Object.keys(data)
-      .map(key => encodeURIComponent(key) + '=' + encodeURIComponent(data[key]))
-      .join('&');
+    const params = new URLSearchParams();
+    params.append("post_id", postId);
+    params.append("csrf_token", csrfToken);
 
-    // دمج البيانات ورابط الـ POST لإرساله بأمان وتجاوز الحظر
-    const targetUrl = PROXY_URL + encodeURIComponent(url + "?" + formBody);
-
-    const res = await fetch(targetUrl, {
-      method: 'GET', // تحويل الطلب عبر البروكسي السحابي لضمان تجنب قيود الحماية
+    const res = await fetch(`${WATCH_BASE}/get__watch__server/`, {
+      method: "POST",
       headers: {
-        "User-Agent": HEADERS["User-Agent"],
-        "Referer": referer
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": EXACT_HEADERS["User-Agent"],
+        "Referer": embedUrl,
+        "Origin": WATCH_BASE
       },
-      timeout: 10000
+      body: params.toString(),
+      timeout: 8000
     });
     return await res.text();
   } catch (err) {
+    console.error("[-] Ajax request failed:", err.message);
     return null;
   }
 }
 
-// دالة السحب الأساسية المطابقة لـ GameHub Extractor
-async function extractDirectStreams(imdbId) {
-  const watchUrl = `${WATCH_BASE}/watch/${imdbId}`;
-  
-  // 1. جلب كود صفحة المشاهدة الأساسية
-  const html = await fetchHtmlViaProxy(watchUrl, "https://asd.pics/");
-  if (!html) return [];
-
+// دالة السحب الأساسية المتوافقة تماماً مع سيرفر عرب سيد (GameHub)
+async function extractGameHubStreams(imdbId) {
   const streams = [];
   const seen = new Set();
 
-  // 2. استخراج csrf_token والـ post_id (objId) بدقة
+  // صياغة رابط صفحة التوجيه المباشرة للمشغل
+  const embedUrl = `${WATCH_BASE}/embed-${imdbId}.html`;
+  const watchUrl = `${WATCH_BASE}/watch/${imdbId}`;
+
+  // 1. محاولة جلب كود الصفحة الأساسية للمشغل
+  let html = await getWatchPageHtml(embedUrl);
+  if (!html) {
+    html = await getWatchPageHtml(watchUrl);
+  }
+
+  if (!html) return [];
+
+  // 2. استخراج الـ csrf_token والـ post_id (objId) من كود الصفحة
   const csrfTokenMatch = html.match(/['" ]csrf_token['" ]\s*:\s*['"]([^'"]+)['"]/);
   const csrfToken = csrfTokenMatch ? csrfTokenMatch[1] : null;
 
@@ -92,22 +100,19 @@ async function extractDirectStreams(imdbId) {
   const objIdMatch = html.match(/['" ]objId['" ]\s*:\s*['" ]?(\d+)['" ]?/i) || html.match(/post_id['" ]\s*:\s*['" ]?(\d+)['" ]?/i);
   if (objIdMatch) {
     objId = objIdMatch[1];
+  } else {
+    // محاولة إضافية لاستخراج المعرف من الرابط نفسه
+    objId = imdbId.replace(/\D/g, "");
   }
 
-  console.log(`[AsdPics] Extracted Details -> ObjID: ${objId} | Token: ${csrfToken}`);
+  console.log(`[AsdPics] Details -> PostID: ${objId} | Token: ${csrfToken}`);
 
-  // 3. إرسال طلب الـ POST المشفر واستخراج روابط البث المباشرة
+  // 3. في حال توفر الـ Token، نقوم بطلب الـ Ajax الفعلي ومسح الروابط
   if (csrfToken && objId) {
-    const ajaxUrl = `${WATCH_BASE}/get__watch__server/`;
-    const postData = {
-      "post_id": objId,
-      "csrf_token": csrfToken
-    };
-
-    const ajaxResponse = await postAjaxViaProxy(ajaxUrl, postData, watchUrl);
+    const ajaxResponse = await getWatchServersAjax(objId, csrfToken, embedUrl);
 
     if (ajaxResponse) {
-      // أ) البحث عن روابط البث المباشرة m3u8
+      // أ) البحث عن روابط m3u8 من استجابة الـ Ajax
       const m3u8Pattern = /https?:\/\/[^\s"']+\.m3u8[^\s"']*/gi;
       let m3u8Match;
       while ((m3u8Match = m3u8Pattern.exec(ajaxResponse)) !== null) {
@@ -131,7 +136,7 @@ async function extractDirectStreams(imdbId) {
         }
       }
 
-      // ب) البحث عن روابط البث المباشرة MP4 (مثل Boutique)
+      // ب) البحث عن روابط MP4 من استجابة الـ Ajax (مثل Boutique)
       const mp4Pattern = /https?:\/\/[^\s"']+\.mp4[^\s"']*/gi;
       let mp4Match;
       while ((mp4Match = mp4Pattern.exec(ajaxResponse)) !== null) {
@@ -154,6 +159,24 @@ async function extractDirectStreams(imdbId) {
     }
   }
 
+  // 4. فحص احتياطي لكود الـ HTML الأساسي في حال كانت الروابط مكتوبة مباشرة فيه
+  const directLinksPattern = /https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/gi;
+  let directMatch;
+  while ((directMatch = directLinksPattern.exec(html)) !== null) {
+    let streamUrl = directMatch[0];
+    if (streamUrl.endsWith(")") || streamUrl.endsWith("'") || streamUrl.endsWith('"')) {
+      streamUrl = streamUrl.slice(0, -1);
+    }
+    if (!seen.has(streamUrl) && !streamUrl.includes("templates") && !streamUrl.includes("assets")) {
+      seen.add(streamUrl);
+      const isHls = streamUrl.includes(".m3u8");
+      streams.push({
+        url: streamUrl,
+        title: `سيرفر مباشر احتياطي (${isHls ? "HLS" : "MP4"})`
+      });
+    }
+  }
+
   return streams;
 }
 
@@ -169,14 +192,14 @@ app.get("/", (req, res) => {
 app.get("/stream/:type/:id.json", async (req, res) => {
   const { type, id } = req.params;
   const parts = id.split(":");
-  const imdbId = parts[0];
+  const imdbId = parts[0]; // استخراج الـ imdb id الفعلي (مثل: tt1757678)
 
-  console.log(`[AsdPics] Processing Stream request for: ${imdbId}`);
+  console.log(`[AsdPics] Extractor request received for: ${imdbId}`);
 
   try {
-    const rawStreams = await extractDirectStreams(imdbId);
+    const rawStreams = await extractGameHubStreams(imdbId);
     
-    // إعادة الروابط لستريمو كبث مباشر فوري
+    // إرسال الروابط لستريمو كبث مباشر
     const streams = rawStreams.map(s => ({
       name: "Asd Pics by Abdulluh.X",
       title: `🎬 ${s.title}`,
@@ -190,10 +213,10 @@ app.get("/stream/:type/:id.json", async (req, res) => {
       }
     }));
 
-    console.log(`[AsdPics] Total streams found: ${streams.length}`);
+    console.log(`[AsdPics] Streams successfully extracted count: ${streams.length}`);
     res.json({ streams });
   } catch (e) {
-    console.error("[AsdPics] Stream process error:", e.message);
+    console.error("[AsdPics] Extraction error:", e.message);
     res.json({ streams: [] });
   }
 });
