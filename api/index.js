@@ -1,262 +1,131 @@
-const https = require("https");
-const http = require("http");
+const express = require("express");
+const cors = require("cors");
+const { load } = require("cheerio");
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
-const BASE_URL = "https://arabseed.ink";
-const WATCH_BASE = "https://m.reviewrate.net"; // نطاق المشغل المباشر لتخطي الحماية
-const TMDB_KEY = "439c478a771f35c05022f9feabcca01c";
+const app = express();
+app.use(cors());
 
-// إعداد الهيدرز المطابقة تماماً لتطبيق Cloudstream لضمان تجاوز فلترة الحماية
-const EXACT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Upgrade-Insecure-Requests": "1"
-};
+const WATCH_BASE = "https://m.reviewrate.net";
+const USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
 
-const MANIFEST = {
-    id: "community.arabseed.abdulluhx",
-    version: "1.1.0",
-    name: "ArabSeed by Abdulluh.X",
-    description: "إضافة متطورة لسحب البث المباشر (m3u8 / mp4) وتشغيله داخلياً وبدون خروج من ستريمو",
+const manifest = {
+    id: "community.asdpics.abdulluhx",
+    version: "2.5.0",
+    name: "Arabseed Premium | عرب سيد",
+    description: "سحب البث المباشر (HLS/MP4) بناءً على تحليل نظام GameHub الرسمي",
     logo: "https://asd.pics/templates/Default/images/logo.png",
     resources: ["stream"],
     types: ["movie", "series"],
-    catalogs: [],
     idPrefixes: ["tt"]
 };
 
-function fetchText(url, headers) {
-    return new Promise((resolve) => {
-        const client = url.startsWith("https") ? https : http;
-        const timer = setTimeout(() => resolve(""), 10000);
-        try {
-            const req = client.get(url, {
-                headers: Object.assign({}, EXACT_HEADERS, headers || {})
-            }, (res) => {
-                const chunks = [];
-                res.on("data", c => chunks.push(c));
-                res.on("end", () => { clearTimeout(timer); resolve(Buffer.concat(chunks).toString("utf-8")); });
-            });
-            req.on("error", () => { clearTimeout(timer); resolve(""); });
-        } catch (e) { clearTimeout(timer); resolve(""); }
+// دالة محاكاة طلبات POST الخاصة بـ Arabseed (بناءً على ملف Arabseed.kt)
+async function postToArabseed(path, body, referer) {
+    const params = new URLSearchParams();
+    for (const key in body) params.append(key, body[key]);
+
+    const res = await fetch(`${WATCH_BASE}${path}`, {
+        method: "POST",
+        headers: {
+            "User-Agent": USER_AGENT,
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": referer,
+            "Origin": WATCH_BASE
+        },
+        body: params.toString()
     });
+    return await res.text();
 }
 
-function postData(url, body, headers) {
-    return new Promise((resolve) => {
-        const bodyStr = typeof body === "string" ? body : new URLSearchParams(body).toString();
-        const urlObj = new URL(url);
-        const timer = setTimeout(() => resolve(""), 10000);
-        try {
-            const client = url.startsWith("https") ? https : http;
-            const req = client.request({
-                hostname: urlObj.hostname,
-                path: urlObj.pathname + urlObj.search,
-                method: "POST",
-                headers: Object.assign({}, EXACT_HEADERS, {
-                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "Content-Length": Buffer.byteLength(bodyStr),
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Referer": headers?.Referer || WATCH_BASE,
-                    "Origin": WATCH_BASE
-                }, headers || {})
-            }, (res) => {
-                const chunks = [];
-                res.on("data", c => chunks.push(c));
-                res.on("end", () => { clearTimeout(timer); resolve(Buffer.concat(chunks).toString("utf-8")); });
-            });
-            req.on("error", () => { clearTimeout(timer); resolve(""); });
-            req.write(bodyStr);
-            req.end();
-        } catch (e) { clearTimeout(timer); resolve(""); }
-    });
-}
-
-function fetchJson(url) {
-    return new Promise((resolve) => {
-        const client = url.startsWith("https") ? https : http;
-        const timer = setTimeout(() => resolve({}), 8000);
-        try {
-            const req = client.get(url, {
-                headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
-            }, (res) => {
-                let data = "";
-                res.on("data", c => data += c);
-                res.on("end", () => { clearTimeout(timer); try { resolve(JSON.parse(data)); } catch (e) { resolve({}); } });
-            });
-            req.on("error", () => { clearTimeout(timer); resolve({}); });
-        } catch (e) { clearTimeout(timer); resolve({}); }
-    });
-}
-
-async function getTmdbMeta(imdbId, type) {
-    const data = await fetchJson(
-        "https://api.themoviedb.org/3/find/" + imdbId +
-        "?api_key=" + TMDB_KEY + "&external_source=imdb_id"
-    );
-    const results = type === "movie" ? data.movie_results : data.tv_results;
-    if (!results || results.length === 0) return null;
-    const item = results[0];
-    const arData = await fetchJson(
-        "https://api.themoviedb.org/3/" + (type === "movie" ? "movie" : "tv") + "/" +
-        item.id + "?api_key=" + TMDB_KEY + "&language=ar-SA"
-    );
-    return {
-        arabicTitle: arData.title || arData.name || item.title || item.name || ""
-    };
-}
-
-// دالة تفكيك واستخراج روابط البث المباشرة من المشغل مباشرة
-async function extractDirectGameHubStreams(imdbId) {
-    const embedUrl = `${WATCH_BASE}/embed-${imdbId}.html`;
+async function extractStreams(imdbId) {
     const watchUrl = `${WATCH_BASE}/watch/${imdbId}`;
-
-    // 1. طلب صفحة الـ embed مباشرة لتفادي فلترة Cloudflare لنطاق عرب سيد الرئيسي
-    let html = await fetchText(embedUrl, { "Referer": "https://asd.pics/" });
-    if (!html || html.length < 500) {
-        html = await fetchText(watchUrl, { "Referer": "https://asd.pics/" });
-    }
-    if (!html) return [];
-
     const streams = [];
     const seen = new Set();
 
-    // 2. استخراج csrf_token والـ post_id (objId) من كود المشغل
-    const csrfTokenMatch = html.match(/['" ]csrf_token['" ]\s*:\s*['"]([^'"]+)['"]/);
-    const csrfToken = csrfTokenMatch ? csrfTokenMatch[1] : null;
+    try {
+        // 1. جلب الصفحة الرئيسية لاستخراج التوكن والمعرف (بناءً على GameHubExtractor.kt)
+        const html = await fetch(watchUrl, { headers: { "User-Agent": USER_AGENT } }).then(res => res.text());
+        const csrfToken = html.match(/['"]csrf_token['"]\s*:\s*['"]([^'"]+)['"]/)?.[1];
+        const postId = html.match(/post_id['" ]\s*:\s*['" ]?(\d+)/)?.[1] || html.match(/data-post=["'](\d+)["']/)?.[1];
 
-    let objId = null;
-    const objIdMatch = html.match(/['" ]objId['" ]\s*:\s*['" ]?(\d+)['" ]?/i) || html.match(/post_id['" ]\s*:\s*['" ]?(\d+)['" ]?/i);
-    if (objIdMatch) {
-        objId = objIdMatch[1];
-    } else {
-        objId = imdbId.replace(/\D/g, ""); // استخراج الرقم من معرف IMDb كاحتياط
-    }
+        if (!csrfToken || !postId) return [];
 
-    // 3. إرسال طلب الـ POST لاستخراج السيرفرات الحقيقية
-    if (csrfToken && objId) {
-        const ajaxUrl = `${WATCH_BASE}/get__watch__server/`;
-        const postDataBody = {
-            "post_id": objId,
-            "csrf_token": csrfToken
-        };
+        // 2. طلب قائمة السيرفرات (المرحلة الأولى من POST كما في فيديو التحليل)
+        const serverListHtml = await postToArabseed("/get__watch__server/", { post_id: postId, csrf_token: csrfToken }, watchUrl);
+        const $ = load(serverListHtml);
+        const serverIds = [];
+        
+        $("li[data-server]").each((_i, el) => {
+            serverIds.push($(el).attr("data-server"));
+        });
 
-        const ajaxResponse = await postData(ajaxUrl, postDataBody, { "Referer": embedUrl });
+        // 3. طلب الرابط الفعلي لكل سيرفر (المرحلة الثانية من POST)
+        for (const sId of serverIds.slice(0, 5)) { // جلب أول 5 سيرفرات لضمان السرعة
+            const jsonRes = await postToArabseed("/get__watch__server/", {
+                post_id: postId,
+                csrf_token: csrfToken,
+                server: sId
+            }, watchUrl);
 
-        if (ajaxResponse) {
-            // أ) جلب روابط الـ m3u8
-            const m3u8Pattern = /https?:\/\/[^\s"']+\.m3u8[^\s"']*/gi;
-            let m3u8Match;
-            while ((m3u8Match = m3u8Pattern.exec(ajaxResponse)) !== null) {
-                let streamUrl = m3u8Match[0];
-                if (streamUrl.endsWith(")") || streamUrl.endsWith("'") || streamUrl.endsWith('"')) {
-                    streamUrl = streamUrl.slice(0, -1);
-                }
-                if (!seen.has(streamUrl)) {
-                    seen.add(streamUrl);
+            try {
+                const parsed = JSON.parse(jsonRes);
+                let iframeUrl = parsed.server;
+                if (iframeUrl && !seen.has(iframeUrl)) {
+                    if (iframeUrl.startsWith("//")) iframeUrl = "https:" + iframeUrl;
+                    seen.add(iframeUrl);
 
-                    let serverLabel = "سيرفر البث الرئيسي HLS";
-                    if (streamUrl.includes("s1q2105.com")) serverLabel = "عرب سيد أساسي (HLS)";
-                    if (streamUrl.includes("vmwesa.online")) serverLabel = "سيرفر سحابي VMW";
-                    if (streamUrl.includes("r66nv9ed.com")) serverLabel = "سيرفر سريع Sprint";
-                    if (streamUrl.includes("tnmr.org")) serverLabel = "سيرفر ممتاز HLS";
+                    // 4. الدخول للـ iframe وسحب روابط الـ m3u8 والـ mp4 مباشرة
+                    const embedHtml = await fetch(iframeUrl, { headers: { "User-Agent": USER_AGENT, "Referer": watchUrl } }).then(res => res.text());
+                    
+                    // بحث عن m3u8
+                    const m3u8s = embedHtml.match(/https?:\/\/[^\s"']+\.m3u8[^\s"']*/gi) || [];
+                    m3u8s.forEach(url => {
+                        if (!seen.has(url)) {
+                            seen.add(url);
+                            streams.push({
+                                title: `📺 سيرفر ${streams.length + 1} (HLS)`,
+                                url: url
+                            });
+                        }
+                    });
 
-                    streams.push({
-                        url: streamUrl,
-                        title: serverLabel
+                    // بحث عن mp4 (سيرفر Boutique)
+                    const mp4s = embedHtml.match(/https?:\/\/[^\s"']+\.mp4[^\s"']*/gi) || [];
+                    mp4s.forEach(url => {
+                        if (!seen.has(url)) {
+                            seen.add(url);
+                            streams.push({
+                                title: `🎬 سيرفر ${streams.length + 1} (MP4)`,
+                                url: url
+                            });
+                        }
                     });
                 }
-            }
-
-            // ب) جلب روابط الـ MP4 (سيرفر Boutique)
-            const mp4Pattern = /https?:\/\/[^\s"']+\.mp4[^\s"']*/gi;
-            let mp4Match;
-            while ((mp4Match = mp4Pattern.exec(ajaxResponse)) !== null) {
-                let streamUrl = mp4Match[0];
-                if (streamUrl.endsWith(")") || streamUrl.endsWith("'") || streamUrl.endsWith('"')) {
-                    streamUrl = streamUrl.slice(0, -1);
-                }
-                if (!seen.has(streamUrl)) {
-                    seen.add(streamUrl);
-
-                    let serverLabel = "سيرفر MP4 مباشر";
-                    if (streamUrl.includes("boutique")) serverLabel = "سيرفر Boutique المباشر";
-
-                    streams.push({
-                        url: streamUrl,
-                        title: serverLabel
-                    });
-                }
-            }
+            } catch (e) {}
         }
+    } catch (e) {
+        console.error("Extraction error:", e);
     }
-
-    // 4. فحص احتياطي لكود الـ HTML الأساسي في حال توفر الروابط مباشرة بداخله
-    const fallbackPattern = /https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/gi;
-    let fallbackMatch;
-    while ((fallbackMatch = fallbackPattern.exec(html)) !== null) {
-        let streamUrl = fallbackMatch[0];
-        if (streamUrl.endsWith(")") || streamUrl.endsWith("'") || streamUrl.endsWith('"')) {
-            streamUrl = streamUrl.slice(0, -1);
-        }
-        if (!seen.has(streamUrl) && !streamUrl.includes("templates") && !streamUrl.includes("assets")) {
-            seen.add(streamUrl);
-            const isHls = streamUrl.includes(".m3u8");
-            streams.push({
-                url: streamUrl,
-                title: `سيرفر مباشر احتياطي (${isHls ? "HLS" : "MP4"})`
-              });
-        }
-    }
-
     return streams;
 }
 
-module.exports = async function(req, res) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Content-Type", "application/json");
-
-    const url = req.url || "/";
-
-    if (url === "/" || url.includes("/manifest.json")) {
-        return res.end(JSON.stringify(MANIFEST));
-    }
-
-    const streamMatch = url.match(/\/stream\/(movie|series)\/(.+)\.json/);
-    if (streamMatch) {
-        try {
-            const type = streamMatch[1];
-            const fullId = streamMatch[2];
-            const parts = fullId.split(":");
-            const imdbId = parts[0]; // استخراج الـ IMDb ID مباشرة للفتح الفوري (مثل tt1757678)
-
-            console.log("[ArabSeed] Fetching stream links for IMDb ID: " + imdbId);
-            const rawStreams = await extractDirectGameHubStreams(imdbId);
-            
-            // صياغة الروابط لتعود بصيغة البث المباشر المتوافقة مع مشغل ستريمو الداخلي
-            const streams = rawStreams.map(s => ({
-                name: "ArabSeed by Abdulluh.X",
-                title: `🎬 ${s.title}`,
-                url: s.url,
-                behaviorHints: {
-                    notWebReady: false,
-                    headers: {
-                        "Referer": `${WATCH_BASE}/`,
-                        "Origin": WATCH_BASE
-                    }
-                }
-            }));
-
-            console.log("[ArabSeed] Total streams successfully extracted: " + streams.length);
-            return res.end(JSON.stringify({ streams }));
-        } catch (e) {
-            console.error("[ArabSeed] Error: " + e.message);
-            return res.end(JSON.stringify({ streams: [] }));
+app.get("/manifest.json", (req, res) => res.json(manifest));
+app.get("/stream/:type/:id.json", async (req, res) => {
+    const imdbId = req.params.id.split(":")[0];
+    const rawStreams = await extractStreams(imdbId);
+    
+    const streams = rawStreams.map(s => ({
+        name: "Arabseed by Abdulluh.X",
+        title: s.title,
+        url: s.url,
+        behaviorHints: {
+            notWebReady: false,
+            headers: { "Referer": WATCH_BASE + "/" }
         }
-    }
+    }));
+    res.json({ streams });
+});
 
-    res.statusCode = 404;
-    res.end(JSON.stringify({ error: "Not found" }));
-};
+module.exports = app;
