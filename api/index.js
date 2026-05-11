@@ -1,44 +1,49 @@
 const express = require("express");
 const cors = require("cors");
 const { load } = require("cheerio");
-
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const app = express();
 app.use(cors());
 
+// --- إعدادات ScrapingBee بالمفتاح الخاص بك ---
+const SCRAPINGBEE_KEY = "AYDMQOEF8G5QN3B7ER570SRSJUXITKBZ39019BGGWABEPFEW2XDQZ8Q654O65IE0BXPBZ7CPRLDRRL7C";
 const WATCH_BASE = "https://m.reviewrate.net";
-// البصمة المستخدمة في ملف CloudflareSolver الخاص بك
 const USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
 
 const manifest = {
     id: "community.asdpics.abdulluhx",
-    version: "3.0.0",
-    name: "Arabseed Pro | عرب سيد",
-    description: "سحب البث المباشر بناءً على نظام GameHub الرسمي",
+    version: "4.5.0",
+    name: "Arabseed Bee | عرب سيد",
+    description: "سحب وتشغيل البث المباشر (HLS/MP4) بتجاوز حماية Cloudflare عبر ScrapingBee",
     logo: "https://asd.pics/templates/Default/images/logo.png",
     resources: ["stream"],
     types: ["movie", "series"],
     idPrefixes: ["tt"]
 };
 
-// دالة محاكاة طلبات POST (المرحلة الحاسمة في GameHubExtractor.kt)
-async function postToReviewRate(path, body, referer) {
-    const params = new URLSearchParams();
-    for (const key in body) params.append(key, body[key]);
+// دالة جلب البيانات عبر ScrapingBee (لحل لغز Cloudflare برمجياً)
+async function fetchViaBee(url, method = "GET", body = null) {
+    // تفعيل render_js و premium_proxy لضمان تخطي الحماية بنجاح
+    let beeUrl = `https://app.scrapingbee.com/api/v1/?api_key=${SCRAPINGBEE_KEY}&url=${encodeURIComponent(url)}&render_js=true&premium_proxy=true`;
+    
+    const options = {
+        method: method,
+        headers: { "User-Agent": USER_AGENT }
+    };
 
-    const res = await fetch(`${WATCH_BASE}${path}`, {
-        method: "POST",
-        headers: {
-            "User-Agent": USER_AGENT,
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": referer,
-            "Origin": WATCH_BASE
-        },
-        body: params.toString()
-    });
-    return await res.text();
+    if (method === "POST" && body) {
+        const bodyParams = new URLSearchParams(body).toString();
+        beeUrl += `&method=POST&body=${encodeURIComponent(bodyParams)}`;
+    }
+
+    try {
+        const res = await fetch(beeUrl, options);
+        return await res.text();
+    } catch (e) {
+        console.error("[-] ScrapingBee Error:", e.message);
+        return null;
+    }
 }
 
 async function extractStreams(imdbId) {
@@ -47,29 +52,37 @@ async function extractStreams(imdbId) {
     const seen = new Set();
 
     try {
-        // 1. جلب الصفحة (استخراج التوكن كما في GameHubExtractor.kt)
-        const html = await fetch(watchUrl, { headers: { "User-Agent": USER_AGENT, "Referer": "https://asd.pics/" } }).then(res => res.text());
+        // 1. جلب صفحة المشغل الأساسية لاستخراج التوكنات
+        const html = await fetchViaBee(watchUrl);
+        if (!html) return [];
+
         const csrfToken = html.match(/['"]csrf_token['"]\s*:\s*['"]([^'"]+)['"]/)?.[1];
         const postId = html.match(/post_id['" ]\s*:\s*['" ]?(\d+)/)?.[1] || html.match(/data-post=["'](\d+)["']/)?.[1];
 
         if (!csrfToken || !postId) return [];
 
-        // 2. طلب قائمة السيرفرات (POST 1)
-        const serverListHtml = await postToReviewRate("/get__watch__server/", { post_id: postId, csrf_token: csrfToken }, watchUrl);
+        // 2. طلب قائمة السيرفرات (Ajax POST)
+        const ajaxUrl = `${WATCH_BASE}/get__watch__server/`;
+        const serverListHtml = await fetchViaBee(ajaxUrl, "POST", { post_id: postId, csrf_token: csrfToken });
+        
+        if (!serverListHtml) return [];
         const $ = load(serverListHtml);
         const servers = [];
         $("li[data-server]").each((_i, el) => {
-            servers.push({ id: $(el).attr("data-server"), quality: $(el).attr("data-quality") || "1080" });
+            servers.push({ 
+                id: $(el).attr("data-server"), 
+                quality: $(el).attr("data-quality") || "1080" 
+            });
         });
 
-        // 3. طلب الـ iframe الحقيقي لكل سيرفر (POST 2 كما في فيديو التحليل)
+        // 3. استخراج روابط الـ iframe والـ m3u8 المباشرة
         for (const srv of servers.slice(0, 3)) {
-            const jsonRes = await postToReviewRate("/get__watch__server/", {
+            const jsonRes = await fetchViaBee(ajaxUrl, "POST", {
                 post_id: postId,
                 csrf_token: csrfToken,
                 server: srv.id,
                 quality: srv.quality
-            }, watchUrl);
+            });
 
             try {
                 const parsed = JSON.parse(jsonRes);
@@ -77,8 +90,8 @@ async function extractStreams(imdbId) {
                 if (iframeUrl) {
                     if (iframeUrl.startsWith("//")) iframeUrl = "https:" + iframeUrl;
                     
-                    // 4. استخراج روابط البث الخام (m3u8/mp4) من داخل الـ iframe
-                    const embedHtml = await fetch(iframeUrl, { headers: { "User-Agent": USER_AGENT, "Referer": watchUrl } }).then(res => res.text());
+                    // الدخول للـ iframe وفحص روابط الفيديو الخام
+                    const embedHtml = await fetchViaBee(iframeUrl);
                     const videoLinks = embedHtml.match(/https?:\/\/[^\s"']+\.(?:m3u8|mp4)[^\s"']*/gi) || [];
                     
                     videoLinks.forEach(link => {
@@ -88,7 +101,10 @@ async function extractStreams(imdbId) {
                             streams.push({
                                 title: `🎬 سيرفر ${srv.id} (${isHls ? "HLS" : "MP4"}) - ${srv.quality}p`,
                                 url: link,
-                                behaviorHints: { notWebReady: false, headers: { "Referer": iframeUrl } }
+                                behaviorHints: { 
+                                    notWebReady: false, 
+                                    headers: { "Referer": iframeUrl } 
+                                }
                             });
                         }
                     });
@@ -99,7 +115,7 @@ async function extractStreams(imdbId) {
     return streams;
 }
 
-// حل مشكلة "Cannot GET /"
+// مسارات Vercel وستريمو
 app.get("/", (req, res) => res.json(manifest));
 app.get("/manifest.json", (req, res) => res.json(manifest));
 
