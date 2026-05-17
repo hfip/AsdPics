@@ -1,8 +1,8 @@
-// index.js
+// api/index.js
 const { addonBuilder } = require("stremio-addon-sdk");
 const cheerio = require("cheerio");
 
-// ============ 1. إعداد البروكسي الآمن والدومين ============
+// ============ 1. إعداد البروكسي الآمن والدومين الفعال ============
 const GOOGLE_PROXY_URL = "https://script.google.com/macros/s/AKfycbwzwsaeYrNMVo39ot5D2ah72SWsN1NaKa-_0yagRowbZNnByWwBiu94mO6mAUjwVGhSrQ/exec";
 const BASE_URL = "https://m.asd.ink";
 
@@ -15,10 +15,10 @@ const builder = new addonBuilder({
     resources: ["stream"],
     types: ["movie", "series"],
     catalogs: [],
-    idPrefixes: ["tt"] // لدعم معرفات IMDb الدولية
+    idPrefixes: ["tt"] // لدعم معرفات IMDb الدولية للأفلام والمسلسلات
 });
 
-// دالة وسيطة لطلب البيانات عبر سيرفرات جوجل لتجنب حظر Vercel
+// دالة وسيطة لطلب البيانات عبر سيرفرات جوجل لتجنب حظر IP الخاص بـ Vercel
 async function fetchViaProxy(targetUrl) {
     try {
         const proxyUrl = `${GOOGLE_PROXY_URL}?action=get_links&url=${encodeURIComponent(targetUrl)}`;
@@ -33,7 +33,7 @@ async function fetchViaProxy(targetUrl) {
     }
 }
 
-// ============ 3. منطق سحب الروابط وتفكيك التشفير ============
+// ============ 3. منطق سحب الروابط وتفكيك التشفير المباشر ============
 async function getDirectLinks(imdbId, type) {
     const streams = [];
     try {
@@ -49,11 +49,11 @@ async function getDirectLinks(imdbId, type) {
         const searchHtml = await (await fetch(searchUrl)).text();
         const $s = cheerio.load(searchHtml);
         
-        // التقاط رابط أول نتيجة بحث مطابقة
+        // التقاط رابط أول نتيجة بحث مطابقة من كود الصفحة
         let targetPageUrl = $s('.MovieBlock a, .Block--Item a, article a, .movie__block a').first().attr('href');
         if (!targetPageUrl) return [];
 
-        // ت) التحويل الإجباري لصفحة المشاهدة المباشرة /watch/ كما في سكريبتات البايثون
+        // ت) التحويل الإجباري لصفحة المشاهدة المباشرة /watch/ لتخطي حمايات الواجهة
         let watchUrl = targetPageUrl.endsWith('/') ? `${targetPageUrl}watch/` : `${targetPageUrl}/watch/`;
         const watchHtml = await fetchViaProxy(watchUrl);
         if (!watchHtml) return [];
@@ -61,7 +61,7 @@ async function getDirectLinks(imdbId, type) {
         const $w = cheerio.load(watchHtml);
         const servers = [];
 
-        // ث) فك تشفير روابط play.php?url=BASE64 المخفية التلقائية لحل مشكلة فشل التشغيل
+        // th) فك تشفير روابط play.php?url=BASE64 المخفية لحل مشكلة عدم التشغيل والمصادر الفارغة
         const b64Regex = /play\.php\?url=([a-zA-Z0-9+/=]+)/g;
         let match;
         while ((match = b64Regex.exec(watchHtml)) !== null) {
@@ -76,7 +76,7 @@ async function getDirectLinks(imdbId, type) {
             } catch (e) {}
         }
 
-        // ج) سحب المشغلات التقليدية الـ iframes
+        // ج) سحب المشغلات التقليدية الـ iframes كخطة دعم ثانية
         $w('iframe').each((i, elem) => {
             const src = $w(elem).attr('src');
             if (src && src.startsWith('http') && !servers.some(s => s.link === src)) {
@@ -84,14 +84,13 @@ async function getDirectLinks(imdbId, type) {
             }
         });
 
-        // ح) فحص السيرفرات المستخرجة وجلب روابط الميديا (.mp4 / .m3u8)
-        // نكتفي بأول 3 سيرفرات بالتوازي لسرعة الاستجابة على Vercel ومنع الـ Timeout
+        // ح) فحص السيرفرات المستخرجة وجلب الروابط الصافية (.mp4 / .m3u8) بالتوازي لتفادي الـ Timeout
         const optimizedServers = servers.slice(0, 3);
         for (const server of optimizedServers) {
             const serverHtml = await fetchViaProxy(server.link);
             if (!serverHtml) continue;
 
-            // سحب روابط HLS m3u8
+            // سحب روابط HLS m3u8 للتشغيل الذكي
             const m3u8Matches = serverHtml.match(/https?:\/\/[^\s"'<>\\)]+\.m3u8[^\s"'<>\\)]*/gi);
             if (m3u8Matches) {
                 [...new Set(m3u8Matches)].forEach(videoUrl => {
@@ -106,7 +105,7 @@ async function getDirectLinks(imdbId, type) {
                 });
             }
 
-            // سحب روابط MP4 المباشرة
+            // سحب روابط MP4 المباشرة للتحميل المباشر والتشغيل
             const mp4Matches = serverHtml.match(/https?:\/\/[^\s"'<>\\)]+\.mp4[^\s"'<>\\)]*/gi);
             if (mp4Matches) {
                 [...new Set(mp4Matches)].forEach(videoUrl => {
@@ -122,7 +121,7 @@ async function getDirectLinks(imdbId, type) {
             }
         }
 
-        // خطة احتياطية خارقة في حال لم نجد جودات مفكوكة صافية (نفتح الرابط في متصفح خارجي بدلاً من شاشة الخطأ السوداء)
+        // خطة بديلة نظيفة في حال لم نجد جودات مفكوكة (نفتح الرابط في متصفح خارجي بدلاً من شاشة الخطأ السوداء)
         if (streams.length === 0) {
             streams.push({
                 name: "DexWorld Web",
@@ -137,12 +136,35 @@ async function getDirectLinks(imdbId, type) {
     return streams;
 }
 
-// ============ 4. معالج البث (Stream Handler) ============
+// ============ 4. معالج البث (Stream Handler) التابع لـ SDK ============
 builder.defineStreamHandler(async (args) => {
-    // استقبال الـ ID القادم من ستريميو (مثل tt1234567) ونوع المحتوى
     const streams = await getDirectLinks(args.id, args.type);
     return { streams };
 });
 
-// تصدير الإضافة المتوافقة مع Vercel Node Serverless
-module.exports = builder.getInterface();
+// تصدير الواجهة لتتوافق كدالة Serverless وحيدة داخل مجلد api
+const addonInterface = builder.getInterface();
+
+export default async function handler(req, res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Content-Type', 'application/json');
+
+    if (req.method === 'OPTIONS') return res.status(200).end();
+
+    // تحويل مسارات Vercel الداخلية وتمريرها لمكتبة ستريميو لتعالجها تلقائياً
+    const url = req.url;
+    if (url === '/' || url === '/manifest.json') {
+        return res.status(200).json(addonInterface.manifest);
+    }
+
+    // معالجة طلب الـ Stream المباشر من التطبيق
+    const streamMatch = url.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
+    if (streamMatch) {
+        const [, type, id] = streamMatch;
+        const result = await getDirectLinks(decodeURIComponent(id), type);
+        return res.status(200).json({ streams: result });
+    }
+
+    return res.status(404).json({ error: 'Not found' });
+}
